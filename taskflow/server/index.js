@@ -1,20 +1,26 @@
 import express from 'express'
 import cors from 'cors'
-import fs from 'fs'
+import mongoose from 'mongoose'
+import dotenv from 'dotenv'
 import path from 'path'
 import { fileURLToPath } from 'url'
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
-const DB_FILE = path.join(__dirname, 'data.json')
+import User from './models/User.js'
+import Milestone from './models/Milestone.js'
+import Task from './models/Task.js'
+
+dotenv.config()
 
 const app = express()
 const PORT = process.env.PORT || 5000
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/bappeda_taskflow'
 
 app.use(cors())
 app.use(express.json())
 
-// --- INITIAL BAPPEDA DATA ---
+let isMongoConnected = false
+
+// --- INITIAL BAPPEDA SEED DATA ---
 const INITIAL_USERS = [
   {
     id: 'kabid1',
@@ -73,7 +79,7 @@ const INITIAL_USERS = [
   },
 ]
 
-const RKPD_MILESTONES = [
+const INITIAL_MILESTONES = [
   { id: 'm1', nama: 'Musrenbang Desa / Kelurahan', bulan: 1, kategori: 'rkpd_murni', deadline: '2026-01-31' },
   { id: 'm2', nama: 'Musrenbang Kecamatan', bulan: 2, kategori: 'rkpd_murni', deadline: '2026-02-28' },
   { id: 'm3', nama: 'Forum SKPD', bulan: 3, kategori: 'rkpd_murni', deadline: '2026-03-31' },
@@ -90,7 +96,7 @@ const INITIAL_TASKS = [
   {
     id: 't1',
     title: 'Persiapan Dokumen Musrenbang Desa/Kelurahan',
-    description: 'Menyiapkan template, panduan teknis, dan dokumen pendukung untuk pelaksanaan Musrenbang Desa.',
+    description: 'Menyiapkan template, panduan teknis, dan dokumen pendukung untuk Musrenbang Desa.',
     jenis: 'rutin',
     kategori_rutin: 'rkpd_murni',
     milestone_id: 'm1',
@@ -109,29 +115,6 @@ const INITIAL_TASKS = [
     penilaian: { ketepatan: 'tepat', kualitas: 'baik' },
     dibuat_pada: '2026-01-05 07:00',
     diselesaikan_pada: '2026-01-28 10:30',
-  },
-  {
-    id: 't2',
-    title: 'Rekap Hasil Musrenbang Kecamatan',
-    description: 'Menyusun rekapitulasi dan kompilasi hasil Musrenbang Kecamatan.',
-    jenis: 'rutin',
-    kategori_rutin: 'rkpd_murni',
-    milestone_id: 'm2',
-    deadline: '2026-02-28',
-    dibuat_oleh: 'kabid1',
-    assignee_id: 'staf_eja',
-    assignee: 'Pak Eja',
-    delegasi_chain: [
-      { dari: 'Kepala Bidang I', ke: 'Sub-Koordinator Perencanaan', waktu: '2026-02-01 08:00' },
-      { dari: 'Sub-Koordinator Perencanaan', ke: 'Pak Eja', waktu: '2026-02-02 09:00' },
-    ],
-    status: 'selesai',
-    file_upload: { nama: 'rekap_musrenbang_kecamatan.xlsx', ukuran: '1.8 MB', waktu: '2026-02-25 14:00' },
-    approval_status: 'approved',
-    komentar_review: 'Rekapitulasi lengkap dan terstruktur.',
-    penilaian: { ketepatan: 'tepat', kualitas: 'baik' },
-    dibuat_pada: '2026-02-01 07:00',
-    diselesaikan_pada: '2026-02-25 14:00',
   },
   {
     id: 't9',
@@ -159,87 +142,132 @@ const INITIAL_TASKS = [
   },
 ]
 
-// --- JSON PERSISTENCE HELPERS ---
-function loadData() {
+let memoryUsers = [...INITIAL_USERS]
+let memoryTasks = [...INITIAL_TASKS]
+
+// --- CONNECT TO MONGODB & SEED ---
+async function connectDB() {
   try {
-    if (fs.existsSync(DB_FILE)) {
-      const raw = fs.readFileSync(DB_FILE, 'utf-8')
-      return JSON.parse(raw)
+    await mongoose.connect(MONGODB_URI, { serverSelectionTimeoutMS: 2000 })
+    isMongoConnected = true
+    console.log(`🍃 Connected to MongoDB Database: ${MONGODB_URI}`)
+
+    // Seed Users if empty
+    const userCount = await User.countDocuments()
+    if (userCount === 0) {
+      await User.insertMany(INITIAL_USERS)
+      console.log('🌱 Seeded MongoDB Users collection.')
+    }
+
+    // Seed Milestones if empty
+    const milestoneCount = await Milestone.countDocuments()
+    if (milestoneCount === 0) {
+      await Milestone.insertMany(INITIAL_MILESTONES)
+      console.log('🌱 Seeded MongoDB Milestones collection.')
+    }
+
+    // Seed Tasks if empty
+    const taskCount = await Task.countDocuments()
+    if (taskCount === 0) {
+      await Task.insertMany(INITIAL_TASKS)
+      console.log('🌱 Seeded MongoDB Tasks collection.')
     }
   } catch (err) {
-    console.error('Error reading DB_FILE:', err)
+    isMongoConnected = false
+    console.warn(`⚠️ MongoDB connection warning (${err.message}). Operating with in-memory / JSON fallback mode.`)
   }
-  const initial = { users: INITIAL_USERS, tasks: INITIAL_TASKS }
-  saveData(initial)
-  return initial
 }
 
-function saveData(data) {
-  try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf-8')
-  } catch (err) {
-    console.error('Error writing DB_FILE:', err)
-  }
-}
+connectDB()
 
 // --- API ROUTES ---
 
 // Healthcheck
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', app: 'Sistem Manajemen Tugas Bappeda Bidang I Backend REST API v1.0' })
+  res.json({
+    status: 'ok',
+    database: isMongoConnected ? 'MongoDB' : 'In-Memory Fallback',
+    mongodb_uri: MONGODB_URI,
+    app: 'Sistem Manajemen Tugas Bappeda Bidang I Backend REST API (MongoDB)',
+  })
 })
 
 // User Management & Login
-app.get('/api/users', (req, res) => {
-  const db = loadData()
-  const safeUsers = db.users.map(({ password, ...u }) => u)
-  res.json(safeUsers)
+app.get('/api/users', async (req, res) => {
+  if (isMongoConnected) {
+    const users = await User.find({}, { password: 0 })
+    return res.json(users)
+  }
+  const safe = memoryUsers.map(({ password, ...u }) => u)
+  res.json(safe)
 })
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body
-  const db = loadData()
-  const user = db.users.find(
-    (u) => u.email.toLowerCase() === (email || '').trim().toLowerCase() && u.password === password
-  )
+  const cleanEmail = (email || '').trim().toLowerCase()
+
+  let user = null
+  if (isMongoConnected) {
+    user = await User.findOne({ email: cleanEmail, password })
+  } else {
+    user = memoryUsers.find((u) => u.email.toLowerCase() === cleanEmail && u.password === password)
+  }
+
   if (!user) {
     return res.status(401).json({ success: false, error: 'Email atau kata sandi tidak sesuai.' })
   }
-  const { password: _pw, ...safeUser } = user
-  res.json({ success: true, user: safeUser })
+
+  const uObj = user.toObject ? user.toObject() : { ...user }
+  delete uObj.password
+  res.json({ success: true, user: uObj })
 })
 
 // RKPD Milestones
-app.get('/api/milestones', (req, res) => {
-  res.json(RKPD_MILESTONES)
+app.get('/api/milestones', async (req, res) => {
+  if (isMongoConnected) {
+    const milestones = await Milestone.find()
+    return res.json(milestones)
+  }
+  res.json(INITIAL_MILESTONES)
 })
 
 // Task REST API
-app.get('/api/tasks', (req, res) => {
-  const db = loadData()
-  let { jenis, status, assignee_id } = req.query
-  let result = db.tasks
+app.get('/api/tasks', async (req, res) => {
+  const { jenis, status, assignee_id } = req.query
+  const filter = {}
 
-  if (jenis && jenis !== 'all') result = result.filter((t) => t.jenis === jenis)
-  if (status && status !== 'all') result = result.filter((t) => t.status === status)
-  if (assignee_id && assignee_id !== 'all') result = result.filter((t) => t.assignee_id === assignee_id)
+  if (jenis && jenis !== 'all') filter.jenis = jenis
+  if (status && status !== 'all') filter.status = status
+  if (assignee_id && assignee_id !== 'all') filter.assignee_id = assignee_id
 
+  if (isMongoConnected) {
+    const tasks = await Task.find(filter).sort({ createdAt: -1 })
+    return res.json(tasks)
+  }
+
+  let result = memoryTasks
+  if (filter.jenis) result = result.filter((t) => t.jenis === filter.jenis)
+  if (filter.status) result = result.filter((t) => t.status === filter.status)
+  if (filter.assignee_id) result = result.filter((t) => t.assignee_id === filter.assignee_id)
   res.json(result)
 })
 
-app.get('/api/tasks/:id', (req, res) => {
-  const db = loadData()
-  const task = db.tasks.find((t) => t.id === req.params.id)
+app.get('/api/tasks/:id', async (req, res) => {
+  if (isMongoConnected) {
+    const task = await Task.findOne({ id: req.params.id })
+    if (!task) return res.status(404).json({ error: 'Tugas tidak ditemukan.' })
+    return res.json(task)
+  }
+  const task = memoryTasks.find((t) => t.id === req.params.id)
   if (!task) return res.status(404).json({ error: 'Tugas tidak ditemukan.' })
   res.json(task)
 })
 
-app.post('/api/tasks', (req, res) => {
-  const db = loadData()
+app.post('/api/tasks', async (req, res) => {
   const data = req.body
-  const assigneeObj = db.users.find((u) => u.id === data.assignee_id) || db.users[2]
+  const assigneeObj = INITIAL_USERS.find((u) => u.id === data.assignee_id) || INITIAL_USERS[2]
 
-  const newTask = {
+  const newTaskData = {
     id: `t_${Date.now()}`,
     title: data.title,
     description: data.description || '',
@@ -262,101 +290,146 @@ app.post('/api/tasks', (req, res) => {
     diselesaikan_pada: null,
   }
 
-  db.tasks.unshift(newTask)
-  saveData(db)
-  res.status(201).json(newTask)
+  if (isMongoConnected) {
+    const doc = await Task.create(newTaskData)
+    return res.status(201).json(doc)
+  }
+
+  memoryTasks.unshift(newTaskData)
+  res.status(201).json(newTaskData)
 })
 
-app.put('/api/tasks/:id', (req, res) => {
-  const db = loadData()
-  const idx = db.tasks.findIndex((t) => t.id === req.params.id)
+app.put('/api/tasks/:id', async (req, res) => {
+  if (isMongoConnected) {
+    const updated = await Task.findOneAndUpdate({ id: req.params.id }, req.body, { new: true })
+    if (!updated) return res.status(404).json({ error: 'Tugas tidak ditemukan.' })
+    return res.json(updated)
+  }
+  const idx = memoryTasks.findIndex((t) => t.id === req.params.id)
   if (idx === -1) return res.status(404).json({ error: 'Tugas tidak ditemukan.' })
-
-  db.tasks[idx] = { ...db.tasks[idx], ...req.body }
-  saveData(db)
-  res.json(db.tasks[idx])
+  memoryTasks[idx] = { ...memoryTasks[idx], ...req.body }
+  res.json(memoryTasks[idx])
 })
 
-app.delete('/api/tasks/:id', (req, res) => {
-  const db = loadData()
-  db.tasks = db.tasks.filter((t) => t.id !== req.params.id)
-  saveData(db)
+app.delete('/api/tasks/:id', async (req, res) => {
+  if (isMongoConnected) {
+    await Task.deleteOne({ id: req.params.id })
+    return res.json({ success: true, message: 'Tugas berhasil dihapus dari MongoDB.' })
+  }
+  memoryTasks = memoryTasks.filter((t) => t.id !== req.params.id)
   res.json({ success: true, message: 'Tugas berhasil dihapus.' })
 })
 
 // Delegation Endpoint
-app.post('/api/tasks/:id/delegate', (req, res) => {
+app.post('/api/tasks/:id/delegate', async (req, res) => {
   const { target_user_id, dari_role } = req.body
-  const db = loadData()
-  const idx = db.tasks.findIndex((t) => t.id === req.params.id)
+
+  if (isMongoConnected) {
+    const task = await Task.findOne({ id: req.params.id })
+    if (!task) return res.status(404).json({ error: 'Tugas tidak ditemukan.' })
+
+    const targetUser = await User.findOne({ id: target_user_id })
+    if (!targetUser) return res.status(400).json({ error: 'User tujuan delegasi tidak ditemukan.' })
+
+    task.delegasi_chain.push({
+      dari: dari_role || 'Pimpinan',
+      ke: targetUser.name,
+      waktu: new Date().toLocaleString('id-ID'),
+    })
+    task.assignee_id = targetUser.id
+    task.assignee = targetUser.name
+
+    await task.save()
+    return res.json(task)
+  }
+
+  const idx = memoryTasks.findIndex((t) => t.id === req.params.id)
   if (idx === -1) return res.status(404).json({ error: 'Tugas tidak ditemukan.' })
 
-  const targetUser = db.users.find((u) => u.id === target_user_id)
+  const targetUser = INITIAL_USERS.find((u) => u.id === target_user_id)
   if (!targetUser) return res.status(400).json({ error: 'User tujuan delegasi tidak ditemukan.' })
 
-  const chain = db.tasks[idx].delegasi_chain || []
-  chain.push({
+  memoryTasks[idx].delegasi_chain.push({
     dari: dari_role || 'Pimpinan',
     ke: targetUser.name,
     waktu: new Date().toLocaleString('id-ID'),
   })
+  memoryTasks[idx].assignee_id = targetUser.id
+  memoryTasks[idx].assignee = targetUser.name
 
-  db.tasks[idx].assignee_id = targetUser.id
-  db.tasks[idx].assignee = targetUser.name
-  db.tasks[idx].delegasi_chain = chain
-
-  saveData(db)
-  res.json(db.tasks[idx])
+  res.json(memoryTasks[idx])
 })
 
-// Softcopy File Upload Endpoint
-app.post('/api/tasks/:id/upload', (req, res) => {
+// Softcopy Upload Endpoint
+app.post('/api/tasks/:id/upload', async (req, res) => {
   const { file_name, file_size } = req.body
-  const db = loadData()
-  const idx = db.tasks.findIndex((t) => t.id === req.params.id)
-  if (idx === -1) return res.status(404).json({ error: 'Tugas tidak ditemukan.' })
 
-  db.tasks[idx].status = 'sedang'
-  db.tasks[idx].file_upload = {
+  const fileMeta = {
     nama: file_name || 'softcopy_hasil_kerja.pdf',
     ukuran: file_size || '2.4 MB',
     waktu: new Date().toLocaleString('id-ID'),
   }
-  db.tasks[idx].approval_status = 'pending'
 
-  saveData(db)
-  res.json(db.tasks[idx])
+  if (isMongoConnected) {
+    const updated = await Task.findOneAndUpdate(
+      { id: req.params.id },
+      { status: 'sedang', file_upload: fileMeta, approval_status: 'pending' },
+      { new: true }
+    )
+    return res.json(updated)
+  }
+
+  const idx = memoryTasks.findIndex((t) => t.id === req.params.id)
+  if (idx === -1) return res.status(404).json({ error: 'Tugas tidak ditemukan.' })
+
+  memoryTasks[idx].status = 'sedang'
+  memoryTasks[idx].file_upload = fileMeta
+  memoryTasks[idx].approval_status = 'pending'
+
+  res.json(memoryTasks[idx])
 })
 
 // Approval & Review Endpoint
-app.post('/api/tasks/:id/review', (req, res) => {
-  const { action, komentar, penilaian } = req.body // action: 'approve' | 'reject'
-  const db = loadData()
-  const idx = db.tasks.findIndex((t) => t.id === req.params.id)
-  if (idx === -1) return res.status(404).json({ error: 'Tugas tidak ditemukan.' })
+app.post('/api/tasks/:id/review', async (req, res) => {
+  const { action, komentar, penilaian } = req.body
 
-  if (action === 'approve') {
-    db.tasks[idx].status = 'selesai'
-    db.tasks[idx].approval_status = 'approved'
-    db.tasks[idx].komentar_review = komentar || 'Softcopy disetujui pimpinan.'
-    db.tasks[idx].penilaian = penilaian || { ketepatan: 'tepat', kualitas: 'baik' }
-    db.tasks[idx].diselesaikan_pada = new Date().toISOString()
-  } else {
-    db.tasks[idx].status = 'revisi'
-    db.tasks[idx].approval_status = 'rejected'
-    db.tasks[idx].komentar_review = komentar || 'Perlu perbaikan sesuai arahan.'
+  const patch =
+    action === 'approve'
+      ? {
+          status: 'selesai',
+          approval_status: 'approved',
+          komentar_review: komentar || 'Softcopy disetujui pimpinan.',
+          penilaian: penilaian || { ketepatan: 'tepat', kualitas: 'baik' },
+          diselesaikan_pada: new Date().toISOString(),
+        }
+      : {
+          status: 'revisi',
+          approval_status: 'rejected',
+          komentar_review: komentar || 'Perlu perbaikan sesuai arahan.',
+        }
+
+  if (isMongoConnected) {
+    const updated = await Task.findOneAndUpdate({ id: req.params.id }, patch, { new: true })
+    return res.json(updated)
   }
 
-  saveData(db)
-  res.json(db.tasks[idx])
+  const idx = memoryTasks.findIndex((t) => t.id === req.params.id)
+  if (idx === -1) return res.status(404).json({ error: 'Tugas tidak ditemukan.' })
+
+  memoryTasks[idx] = { ...memoryTasks[idx], ...patch }
+  res.json(memoryTasks[idx])
 })
 
 // Rekap Kinerja Endpoint
-app.get('/api/rekap', (req, res) => {
-  const db = loadData()
-  const completed = db.tasks.filter((t) => t.status === 'selesai')
-  const totalCompleted = completed.length
+app.get('/api/rekap', async (req, res) => {
+  let completed = []
+  if (isMongoConnected) {
+    completed = await Task.find({ status: 'selesai' })
+  } else {
+    completed = memoryTasks.filter((t) => t.status === 'selesai')
+  }
 
+  const totalCompleted = completed.length
   let tepat = 0
   let baik = 0, cukup = 0, kurang = 0
 
